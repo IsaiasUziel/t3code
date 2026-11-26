@@ -198,7 +198,20 @@ export const animateSidebarLayoutChanges: AnimateLayoutChanges = (args) =>
 
 // Snoozed rows cannot accept drops without a wake time. Working rows only drag out as chat context.
 
-export type SidebarSection = "pinned" | "active" | "working" | "snoozed" | "settled";
+export type SidebarShelf = "working" | "snoozed" | "settled";
+export type SidebarSection = "pinned" | "active" | SidebarShelf;
+
+export function threadShellKey(thread: Pick<SidebarThreadSummary, "environmentId" | "id">) {
+  return scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+}
+
+export function sidebarFolderRowId(projectKey: string) {
+  return `folder:${projectKey}`;
+}
+
+export function sidebarShelfRowId(shelf: SidebarShelf, folderRow?: string) {
+  return folderRow ? `shelf:${shelf}:${folderRow}` : `shelf:${shelf}`;
+}
 
 export function resolveSidebarThreadSection(input: {
   readonly snoozed: boolean;
@@ -1052,9 +1065,7 @@ export function resolveSidebarFolderDot(
 }
 
 /**
- * Keys the old per-project sidebar saved folder open state under, most
- * specific first, for `resolveProjectExpanded`. Boring folders read and write
- * the same keys, so a legacy user's closed folders stay closed after regrouping.
+ * Prefer scoped folder state, then fall back to the cwd saved by the old per-project sidebar.
  */
 export function sidebarFolderExpansionKeys(group: {
   readonly projectKey: string;

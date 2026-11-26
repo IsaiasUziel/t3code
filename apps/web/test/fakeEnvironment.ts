@@ -108,7 +108,7 @@ export const CLAUDE_PROVIDER = {
 };
 
 const decodeServerConfig = Schema.decodeUnknownSync(ServerConfig);
-const makeServerConfig = (
+export const makeServerConfig = (
   providers: ReadonlyArray<unknown>,
   supportsIssues = false,
 ): ServerConfig => ({

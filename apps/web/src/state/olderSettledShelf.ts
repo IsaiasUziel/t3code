@@ -9,6 +9,7 @@ import {
   type OlderSettledScope,
 } from "@t3tools/client-runtime/state/threads";
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { Atom } from "effect/reactivity";
 import { useEffect, useState } from "react";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -16,86 +17,111 @@ import { olderSettledThreads, threadFamilies } from "./threads";
 
 const NO_PAGES: ReadonlyMap<EnvironmentId, number> = new Map();
 
-/**
- * The Settled shelf for one scope when shells leave older settled threads out: which rows it may
- * list, how many threads it holds in all, and the pages read below each environment's cut, whose
- * rows merge into the thread list. `useOlderSettledShelfGrowth` reads the next pages.
- */
-export function useOlderSettledShelf(input: {
+type ShelfInput = {
   readonly scopes: ReadonlyArray<OlderSettledScope>;
-  /** A collapsed shelf mounts no pages, so a reconnect reads none; expanding restores them. */
-  readonly expanded: boolean;
-  /** Rows the shelf shows; pages are read until it lists that many. */
   readonly visibleCount: number;
-}) {
-  const scopes = sortOlderSettledScopes(input.scopes);
-  const scopeKey = JSON.stringify(scopes);
-  const [requested, setRequested] = useState({ scopeKey, pages: NO_PAGES });
-  const pages = requested.scopeKey === scopeKey && input.expanded ? requested.pages : NO_PAGES;
-  const shelfScopes = scopes.map((scope) => ({
-    scope,
-    pages: pages.get(scope.environmentId) ?? 0,
-  }));
-  const shelfKey = JSON.stringify(shelfScopes);
-  const shelf = useAtomValue(olderSettledThreads.shelfAtom(shelfScopes));
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mounts the requested older settled pages into the thread family registry while shown
+};
+
+type ShelfScope = { readonly scope: OlderSettledScope; readonly pages: number };
+
+const shelvesAtom = Atom.family((key: string) => {
+  const scopes = JSON.parse(key) as ShelfScope[][];
+  const atoms = scopes.map((entries) => olderSettledThreads.shelfAtom(entries));
+  return Atom.make((get) => atoms.map((atom) => get(atom)));
+});
+
+/** Each expanded shelf pages only its own projects, even when several share an environment. */
+export function useOlderSettledShelves(inputs: ReadonlyArray<ShelfInput>) {
+  const [requested, setRequested] = useState<
+    ReadonlyMap<string, ReadonlyMap<EnvironmentId, number>>
+  >(new Map());
+  const requests = inputs.map((input) => {
+    const scopes = sortOlderSettledScopes(input.scopes);
+    const key = JSON.stringify(scopes);
+    const pages = input.visibleCount > 0 ? (requested.get(key) ?? NO_PAGES) : NO_PAGES;
+    return {
+      key,
+      scopes,
+      pages,
+      visibleCount: input.visibleCount,
+      entries: scopes.map((scope) => {
+        const count = pages.get(scope.environmentId) ?? 0;
+        // Before the first page, every project in an environment shares the same shell cut.
+        return { scope: count ? scope : { ...scope, projectIds: null }, pages: count };
+      }),
+    };
+  });
+  const scopeKeys = new Set(requests.map((request) => request.key));
+  if ([...requested.keys()].some((key) => !scopeKeys.has(key))) {
+    setRequested(new Map([...requested].filter(([key]) => scopeKeys.has(key))));
+  }
+  const environments = useAtomValue(
+    shelvesAtom(JSON.stringify(requests.map((request) => request.entries))),
+  );
+  // A page can change project activity order. Bind its rows independently of the order on screen.
+  const loadedKey = JSON.stringify(
+    requests
+      .filter((request) => request.pages.size > 0)
+      .sort((left, right) => left.key.localeCompare(right.key))
+      .flatMap((request) => request.entries.filter((entry) => entry.pages > 0)),
+  );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mounts the visible shelves' page rows into the thread family registry
   useEffect(() => {
-    const releases = (JSON.parse(shelfKey) as typeof shelfScopes).flatMap(({ scope, pages }) =>
-      pages === 0
-        ? []
-        : [
-            threadFamilies.mountRows(
-              appAtomRegistry,
-              scope.environmentId,
-              olderSettledThreads.rowsKey(scope, pages),
-              olderSettledThreads.pageRowsAtom(scope, pages),
-            ),
-          ],
+    const releases = (JSON.parse(loadedKey) as ShelfScope[]).map(({ scope, pages }) =>
+      threadFamilies.mountRows(
+        appAtomRegistry,
+        scope.environmentId,
+        olderSettledThreads.rowsKey(scope, pages),
+        olderSettledThreads.pageRowsAtom(scope, pages),
+      ),
     );
     return () => {
       for (const release of releases) release();
     };
-  }, [shelfKey]);
-
-  const olderOf = (environmentId: EnvironmentId) => shelf.get(environmentId)?.older ?? null;
-  const pagesOf = (environmentId: EnvironmentId) => shelf.get(environmentId)?.pages;
-  const frontier = settledShelfFrontier([...shelf.values()]);
-  const loaded = shelfScopes.filter(({ pages }) => pages > 0);
-  return {
-    environments: shelf,
-    visibleCount: input.expanded ? input.visibleCount : 0,
-    pages,
-    grow: (next: ReadonlyMap<EnvironmentId, number>) => setRequested({ scopeKey, pages: next }),
-    isListed: (thread: EnvironmentThreadShell) => isListedSettledThread(thread.source, frontier),
-    /** Older settled threads in scope that are not local; add it to the local Settled rows. */
-    unloadedCount: (threads: ReadonlyArray<EnvironmentThreadShell>) =>
-      unloadedOlderSettledCount({ olderSettled: olderOf, scopes, threads }),
-    loading: loaded.some(({ scope }) => pagesOf(scope.environmentId)?.status === "pending"),
-    failed: loaded.some(({ scope }) => pagesOf(scope.environmentId)?.status === "failed"),
-    retry: () => {
-      for (const { scope, pages } of loaded) {
-        olderSettledThreads.retryPages(appAtomRegistry, scope, pages);
-      }
-    },
-  };
+  }, [loadedKey]);
+  return requests.map(({ key, scopes, pages, entries, visibleCount }, index) => {
+    const shelf = environments[index]!;
+    const olderOf = (environmentId: EnvironmentId) => shelf.get(environmentId)?.older ?? null;
+    const frontier = settledShelfFrontier([...shelf.values()]);
+    const loaded = entries.filter((entry) => entry.pages > 0);
+    return {
+      environments: shelf,
+      visibleCount,
+      pages,
+      grow: (next: ReadonlyMap<EnvironmentId, number>) =>
+        setRequested((previous) => new Map(previous).set(key, next)),
+      isListed: (thread: EnvironmentThreadShell) => isListedSettledThread(thread.source, frontier),
+      unloadedCount: (threads: ReadonlyArray<EnvironmentThreadShell>) =>
+        unloadedOlderSettledCount({ olderSettled: olderOf, scopes, threads }),
+      loading: loaded.some(
+        ({ scope }) => shelf.get(scope.environmentId)?.pages.status === "pending",
+      ),
+      failed: loaded.some(({ scope }) => shelf.get(scope.environmentId)?.pages.status === "failed"),
+      retry: () => {
+        for (const entry of loaded) {
+          olderSettledThreads.retryPages(appAtomRegistry, entry.scope, entry.pages);
+        }
+      },
+    };
+  });
 }
 
-/** Reads the next pages while the shelf lists fewer rows than it shows. */
 export function useOlderSettledShelfGrowth(
-  shelf: ReturnType<typeof useOlderSettledShelf>,
-  listedSettledThreads: ReadonlyArray<EnvironmentThreadShell>,
+  shelves: ReturnType<typeof useOlderSettledShelves>,
+  listedCounts: readonly number[],
 ) {
-  const wanted = wantedOlderSettledPages({
-    requested: shelf.pages,
-    environments: shelf.environments,
-    listedCount: listedSettledThreads.length,
-    visibleCount: shelf.visibleCount,
-  });
-  const { grow, pages } = shelf;
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- requests more older settled pages when the listed threads cannot fill the visible count
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- requests the next older pages for each shelf that has not filled its visible rows
   useEffect(() => {
-    if (wanted !== pages) grow(wanted);
-  }, [wanted, pages, grow]);
+    shelves.forEach((shelf, index) => {
+      const wanted = wantedOlderSettledPages({
+        requested: shelf.pages,
+        environments: shelf.environments,
+        listedCount: listedCounts[index]!,
+        visibleCount: shelf.visibleCount,
+      });
+      if (wanted !== shelf.pages) shelf.grow(wanted);
+    });
+  }, [shelves, listedCounts]);
 }
 
 /**

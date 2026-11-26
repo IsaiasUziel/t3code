@@ -1,5 +1,5 @@
 import { useGT } from "gt-react";
-import { SearchIcon, SquarePenIcon, XIcon } from "lucide-react";
+import { FolderTreeIcon, SearchIcon, SquarePenIcon, XIcon } from "lucide-react";
 import {
   type ComponentProps,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -9,12 +9,15 @@ import {
 } from "react";
 
 import { cn } from "~/lib/utils";
+import { updateClientSettings } from "../../hooks/useSettings";
+import { Toggle } from "../ui/toggle";
 import { Button } from "../ui/button";
 import { SidebarInput, SidebarMenuButton } from "../ui/sidebar";
 import { SharedTooltipTrigger } from "../ui/shared-tooltip";
 
 export interface SidebarThreadHeaderProps {
   hasProjects: boolean;
+  groupedByProject: boolean;
   projectScope: ReactNode;
   onNewThread: (event: ReactMouseEvent) => void;
   newThreadDisabled: boolean;
@@ -33,6 +36,7 @@ export interface SidebarThreadHeaderProps {
 
 export function SidebarThreadHeader({
   hasProjects,
+  groupedByProject,
   projectScope,
   onNewThread,
   newThreadDisabled,
@@ -97,7 +101,27 @@ export function SidebarThreadHeader({
         ) : null}
       </div>
       <div className="flex shrink-0 items-center">
-        {hasProjects ? projectScope : null}
+        {hasProjects ? (
+          <>
+            {projectScope}
+            <SharedTooltipTrigger
+              label={gt("Group threads by project")}
+              render={
+                <Toggle
+                  aria-label={gt("Group threads by project")}
+                  variant="ghost"
+                  size="sm"
+                  pressed={groupedByProject}
+                  onPressedChange={(pressed) =>
+                    void updateClientSettings({ boringSidebarEnabled: pressed })
+                  }
+                />
+              }
+            >
+              <FolderTreeIcon className="size-3.5" />
+            </SharedTooltipTrigger>
+          </>
+        ) : null}
         <SidebarHeaderIconButton
           label={gt("New thread")}
           tooltip={

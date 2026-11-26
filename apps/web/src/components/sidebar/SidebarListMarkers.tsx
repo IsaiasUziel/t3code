@@ -6,6 +6,8 @@ import { cn } from "~/lib/utils";
 import {
   animateSidebarLayoutChanges,
   sidebarMarkerId,
+  sidebarShelfRowId,
+  type SidebarShelf,
   type SidebarListMarker,
 } from "../Sidebar.logic";
 import { SIDEBAR_SORTABLE_DRAG_DISABLED } from "./SidebarThreadRow";
@@ -111,7 +113,8 @@ export function SidebarDragBoundary(props: {
 }
 
 export function SidebarSectionHeader(props: {
-  marker: "working-header" | "snoozed-header" | "settled-header";
+  shelf: SidebarShelf;
+  folderRow?: string | undefined;
   label: string;
   /** A muted trailing count. */
   count: number;
@@ -120,28 +123,28 @@ export function SidebarSectionHeader(props: {
   isDropTarget?: boolean;
   toggle: { expanded: boolean; onToggle: () => void };
 }) {
-  const shelf =
-    props.marker === "working-header"
-      ? "working"
-      : props.marker === "snoozed-header"
-        ? "snoozed"
-        : "settled";
+  const { shelf, folderRow } = props;
+  const header = (
+    <CollapsibleSectionHeader
+      data-sidebar-row={sidebarShelfRowId(shelf, folderRow)}
+      data-sidebar-parent={folderRow}
+      onClick={props.toggle.onToggle}
+      expanded={props.toggle.expanded}
+      tone={props.isDropTarget ? "accent" : props.dragging ? "emphasized" : "muted"}
+      data-testid={`sidebar-${shelf}-shelf-toggle`}
+      accessory={<span className="font-normal tabular-nums">{props.count}</span>}
+    >
+      {props.label}
+    </CollapsibleSectionHeader>
+  );
+  if (folderRow) return <li className="ms-7 list-none">{header}</li>;
   return (
     <SortableSidebarMarker
-      marker={props.marker}
-      data-testid={`sidebar-${props.marker}`}
+      marker={`${shelf}-header`}
+      data-testid={`sidebar-${shelf}-header`}
       className={cn("relative mx-0.5 h-8", props.className)}
     >
-      <CollapsibleSectionHeader
-        data-sidebar-row={`shelf:${shelf}`}
-        onClick={props.toggle.onToggle}
-        expanded={props.toggle.expanded}
-        tone={props.isDropTarget ? "accent" : props.dragging ? "emphasized" : "muted"}
-        data-testid={`sidebar-${shelf}-shelf-toggle`}
-        accessory={<span className="font-normal tabular-nums">{props.count}</span>}
-      >
-        {props.label}
-      </CollapsibleSectionHeader>
+      {header}
     </SortableSidebarMarker>
   );
 }

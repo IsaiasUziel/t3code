@@ -1,7 +1,8 @@
 import appCss from "../index.css?inline";
-import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
+import { makeServerConfig } from "../../test/fakeEnvironment";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import * as shelfHooks from "../state/olderSettledShelf";
+import { useUiStateStore } from "../uiStateStore";
 import { createWorkspaceFocusController, workspaceAreaProps } from "../lib/workspaceFocus";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
@@ -38,7 +39,7 @@ import { SidebarProvider } from "./ui/sidebar";
 
 vi.mock(import("../state/olderSettledShelf"), async (original) => {
   const actual = await original();
-  return { ...actual, useOlderSettledShelf: vi.fn(actual.useOlderSettledShelf) };
+  return { ...actual, useOlderSettledShelves: vi.fn(actual.useOlderSettledShelves) };
 });
 vi.mock("../state/entities", { spy: true });
 vi.mock("../state/environments", { spy: true });
@@ -191,6 +192,119 @@ describe("sidebar project folder new thread", () => {
 
     expect(startThread).toHaveBeenCalledExactlyOnceWith(dev1ProjectRef);
   });
+});
+
+it("keeps shelves and their keyboard parents in the owning project across layout and status changes", async () => {
+  using stack = new DisposableStack();
+  const previousSettings = getClientSettings();
+  const initialUi = useUiStateStore.getState();
+  stack.defer(() => __setClientSettingsForTests(previousSettings));
+  stack.defer(() => useUiStateStore.setState(initialUi, true));
+  __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+
+  // Even the physical project and thread ids collide across these two environments.
+  const local = project("app");
+  const remote = { ...local, environmentId: EnvironmentId.make("remote") };
+  vi.mocked(usePrimaryEnvironmentId).mockReturnValue(local.environmentId);
+  vi.mocked(useConnectedEnvironmentIds).mockReturnValue([
+    local.environmentId,
+    remote.environmentId,
+  ]);
+  vi.mocked(useProjects).mockReturnValue([local, remote]);
+  const config = makeServerConfig([]);
+  using _configs = vi
+    .mocked(useServerConfigs)
+    .mockReturnValue(
+      new Map(
+        [local, remote].map(({ environmentId }) => [
+          environmentId,
+          { ...config, environment: { ...config.environment, environmentId } },
+        ]),
+      ),
+    );
+  const rows = [local, remote].flatMap((p) => {
+    const thread = (id: string) =>
+      makeThreadFixture({
+        projectId: p.id,
+        environmentId: p.environmentId,
+        id: ThreadId.make(id),
+        title: `${p.environmentId} ${id}`,
+      });
+    const running = thread("running");
+    return [
+      thread("inbox"),
+      {
+        ...running,
+        runtime: {
+          status: "running" as const,
+          activeRunId: null,
+          providerInstanceId: running.providerInstanceId,
+          providerName: null,
+          lastError: null,
+          updatedAt: running.updatedAt,
+        },
+      },
+      { ...thread("finished"), settledOverride: "settled" as const },
+      { ...thread("archived"), archivedAt: running.updatedAt },
+    ];
+  });
+  vi.mocked(useQuietThreadShells).mockReturnValue(rows);
+  const tree = () => (
+    <SidebarProvider>
+      <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+    </SidebarProvider>
+  );
+  await using screen = await render(tree());
+  const toggle = screen.getByRole("button", { name: "Group threads by project" });
+  await expect.element(toggle).toHaveAttribute("aria-pressed", "false");
+  await act(() => (toggle.element() as HTMLButtonElement).focus());
+  await userEvent.keyboard("{Space}");
+  await expect.element(toggle).toHaveAttribute("aria-pressed", "true");
+  const row = (title: string) => screen.getByRole("button", { name: new RegExp(`^${title},`) });
+  const localFolder = row("local inbox").element().getAttribute("data-sidebar-parent")!;
+  const remoteFolder = row("remote inbox").element().getAttribute("data-sidebar-parent")!;
+  expect(localFolder).not.toBe(remoteFolder);
+  const shelf = (parent: string, section: string) =>
+    screen.container.querySelector<HTMLButtonElement>(
+      `[data-sidebar-parent="${CSS.escape(parent)}"][data-testid="sidebar-${section}-shelf-toggle"]`,
+    )!;
+  const localWorking = shelf(localFolder, "working");
+  const remoteSettled = shelf(remoteFolder, "settled");
+  await act(() => {
+    localWorking.click();
+    remoteSettled.click();
+  });
+  await expect
+    .element(row("local running"))
+    .toHaveAttribute("data-sidebar-parent", localWorking.dataset.sidebarRow!);
+  await expect
+    .element(row("remote finished"))
+    .toHaveAttribute("data-sidebar-parent", remoteSettled.dataset.sidebarRow!);
+  await expect.element(row("remote running")).not.toBeInTheDocument();
+  await expect.element(row("local finished")).not.toBeInTheDocument();
+  await expect.element(row("local archived")).not.toBeInTheDocument();
+  await act(() => (row("local running").element() as HTMLElement).focus());
+  await userEvent.keyboard("{ArrowLeft}");
+  expect(document.activeElement).toBe(localWorking);
+  await userEvent.keyboard("{ArrowLeft}{ArrowLeft}");
+  expect((document.activeElement as HTMLElement).dataset.sidebarRow).toBe(localFolder);
+  await userEvent.keyboard("{ArrowLeft}");
+  await expect.element(row("remote inbox")).toBeInTheDocument();
+  await expect.element(row("local inbox")).not.toBeInTheDocument();
+
+  vi.mocked(useQuietThreadShells).mockReturnValue(
+    rows.map((thread) =>
+      thread.title === "remote running" ? { ...thread, settledOverride: "settled" } : thread,
+    ),
+  );
+  await screen.rerender(tree());
+  await expect
+    .element(row("remote running"))
+    .toHaveAttribute("data-sidebar-parent", remoteSettled.dataset.sidebarRow!);
+  expect(shelf(remoteFolder, "working")).toBeNull();
+  await userEvent.click(toggle);
+  await expect.element(toggle).toHaveAttribute("aria-pressed", "false");
+  await expect.element(row("local inbox")).not.toHaveAttribute("data-sidebar-parent");
 });
 
 // regression: #38623 unsent drafts are listed above threads but mod+1..9 skipped them
@@ -490,14 +604,16 @@ describe("sidebar settled pagination", () => {
     const focusController = createWorkspaceFocusController(document);
     stack.defer(() => focusController.dispose());
     let loading = false;
-    const originalShelf = vi.mocked(shelfHooks.useOlderSettledShelf).getMockImplementation()!;
-    using _shelf = vi.spyOn(shelfHooks, "useOlderSettledShelf").mockImplementation((input) => ({
-      ...originalShelf(input),
-      loading,
-      retry: () => {
-        loading = true;
-      },
-    }));
+    const originalShelf = vi.mocked(shelfHooks.useOlderSettledShelves).getMockImplementation()!;
+    using _shelf = vi.spyOn(shelfHooks, "useOlderSettledShelves").mockImplementation((input) =>
+      originalShelf(input).map((shelf) => ({
+        ...shelf,
+        loading,
+        retry: () => {
+          loading = true;
+        },
+      })),
+    );
     const activeProject = project("active");
     const threads = Array.from({ length: 70 }, (_, index) =>
       makeThreadFixture({
@@ -529,15 +645,7 @@ describe("sidebar settled pagination", () => {
       routeThreadRef: { environmentId: activeProject.environmentId, threadId: threads[0]!.id },
     });
     vi.mocked(useServerConfigs).mockReturnValue(
-      new Map([
-        [
-          activeProject.environmentId,
-          {
-            scratchWorkspaceRoot: null,
-            shellThreadFamilies: false,
-          } as unknown as EnvironmentServerConfig,
-        ],
-      ]),
+      new Map([[activeProject.environmentId, makeServerConfig([])]]),
     );
     await using screen = await render(
       <SidebarProvider

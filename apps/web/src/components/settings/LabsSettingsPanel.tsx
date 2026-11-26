@@ -63,7 +63,7 @@ function BoringSidebarRow() {
       {...searchableSetting("boring-sidebar")}
       devicePreference
       description={gt(
-        "Group sidebar threads into project folders. Pinned threads stay on top, and Snoozed and Settled stay below the folders.",
+        "Keep each project’s threads together, including its Working, Snoozed, and Settled sections.",
       )}
       control={
         <Switch
